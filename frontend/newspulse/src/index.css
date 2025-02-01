@@ -14,7 +14,13 @@
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
 }
-
+.custom-scrollbar::-webkit-scrollbar {
+  display: none; /* Hides scrollbar for Chrome, Safari */
+}
+.custom-scrollbar {
+  -ms-overflow-style: none;  /* Hides scrollbar for IE/Edge */
+  scrollbar-width: none;      /* Hides scrollbar for Firefox */
+}
 a {
   font-weight: 500;
   color: #646cff;
