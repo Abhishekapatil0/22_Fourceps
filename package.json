@@ -1,0 +1,12 @@
+{
+  "name": "22_fourceps",
+  "version": "1.0.0",
+  "description": "This project, 'NewsPulse' is a news aggregation and sentiment analysis website. NewsPulse aims to provide insightful summaries of news articles drawn from a variety of sources and assign sentiments to facilitate purposeful and appropriate news searching and viewing.",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC"
+}

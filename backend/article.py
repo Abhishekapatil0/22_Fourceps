@@ -1,190 +1,120 @@
-# -*- coding: utf-8 -*-
-import re
-import copy
-import requests
-from bs4 import BeautifulSoup, Comment, NavigableString
-import html2text
+import asyncio
+import aiomysql
+import aiohttp
+from transformers import AutoTokenizer, AutoModelForSequenceClassification, AutoModelForSeq2SeqLM
+import torch
+import torch.nn.functional as F
 
-class Extractor():
-    def __init__(self, url, html, threshold, output, **kwargs):
-        self.url = url
-        self.title = ''
-        self.html = html
-        self.output = output
-        self.threshold = threshold
-        self.kwargs = kwargs
-        if not self.html:
-            self.html = self.__download()
+# Move models to GPU if available
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(torch.cuda.get_device_name(0) if torch.cuda.is_available() else "No GPU found")
 
-    def __process_text_ratio(self, soup) -> tuple:
-        """ Calculate the ratio of text vs. HTML tags for a given soup element """
-        soup = copy.copy(soup)
-        if soup:
-            if isinstance(soup, NavigableString):
-                return 1
-            for t in soup.find_all(['script', 'style', 'noscript', 'a', 'img']):
-                t.extract()
-            soup_str = re.sub(
-                r'\s*[^=\s+]+\s*=\s*([^=>]+)?(?=(\s+|>))', "", str(soup))
-            total_len = len(soup_str)
-            if total_len:
-                tag_len = 0.0
-                for tag in re.compile(r'</?\w+[^>]*>|[\s]', re.S).findall(soup_str):
-                    tag_len += len(tag)
-                return (total_len - tag_len) / total_len, total_len
-        return 0, 0
+# MySQL Database Configuration
+DB_CONFIG = {
+    "host": "127.0.0.1",
+    "user": "root",
+    "password": "BeqFUzW8",
+    "db": "news_db"
+}
 
-    def __find_article_html(self, soup) -> BeautifulSoup:
-        """ Find the main content by looking for article-related tags and excluding unwanted sections. """
-        if not soup:
-            return None
-        if isinstance(soup, NavigableString):
-            return soup
+# Load models
+classify_tokenizer = AutoTokenizer.from_pretrained("Yueh-Huan/news-category-classification-distilbert")
+classify_model = AutoModelForSequenceClassification.from_pretrained(
+    "Yueh-Huan/news-category-classification-distilbert", from_tf=True
+).to(device).half().eval()
 
-        # Remove unwanted elements such as ads and recommendations
-        unwanted_selectors = [
-            {'tag': 'div', 'class_': re.compile(r'ad|ads|sponsored|promo|related|recommendation|footer')},  # Common ad classes
-            {'tag': 'aside'},  # <aside> often contains ads or side content
-            {'tag': 'nav'},  # <nav> is for navigation, which we don’t need
-            {'tag': 'footer'},  # Footer is not part of the main article
-            {'tag': 'section', 'class_': re.compile(r'related|recommendations')},  # Sections for related content
-        ]
-        
-        for selector in unwanted_selectors:
-            if 'class_' in selector:
-                for unwanted_tag in soup.find_all(selector['tag'], class_=selector['class_']):
-                    unwanted_tag.extract()  # Remove the unwanted tag
-            else:
-                for unwanted_tag in soup.find_all(selector['tag']):
-                    unwanted_tag.extract()  # Remove the unwanted tag
+sentiment_tokenizer = AutoTokenizer.from_pretrained("cardiffnlp/twitter-xlm-roberta-base-sentiment")
+sentiment_model = AutoModelForSequenceClassification.from_pretrained(
+    "cardiffnlp/twitter-xlm-roberta-base-sentiment"
+).to(device).half().eval()
 
-        # Common classes or tags that hold article content on news websites
-        article_selectors = [
-            {'tag': 'article'},  # Many news sites use <article> tag for news content
-            {'tag': 'div', 'class_': re.compile(r'article|content|main|story')},  # Matching common article classes
-            {'tag': 'section', 'class_': re.compile(r'article|content|main|story')},  # Sometimes sections are used
-        ]
+summarize_tokenizer = AutoTokenizer.from_pretrained("Yooniii/Article_summarizer")
+summarize_model = AutoModelForSeq2SeqLM.from_pretrained("Yooniii/Article_summarizer").to(device).half().eval()
 
-        for selector in article_selectors:
-            # Find potential article content tags
-            if 'class_' in selector:
-                article_tag = soup.find(selector['tag'], class_=selector['class_'])
-            else:
-                article_tag = soup.find(selector['tag'])
+if hasattr(torch, 'compile'):
+    summarize_model = torch.compile(summarize_model)
 
-            if article_tag:
-                # If a matching tag is found, return that tag as the article content
-                return article_tag
+# Sample Content for Debugging
+sample_contents = [
+    "Breaking news: Stock markets crash amid economic downturn. Investors are concerned about rising interest rates and global recession fears, leading to a sharp selloff across major indices.",
+    "Scientists discover new exoplanet with potential for life. The planet, located in a habitable zone, shows promising signs of having liquid water, raising hopes for extraterrestrial life.",
+]
 
-        # If no specific article tags are found, use the default ratio-based logic
-        return self.__find_largest_text_block(soup)
+# Ensure table exists
+async def ensure_table_exists():
+    try:
+        conn = await aiomysql.connect(**DB_CONFIG)
+        async with conn.cursor() as cursor:
+            create_table_query = """
+            CREATE TABLE IF NOT EXISTS news_articles (
+                id INT AUTO_INCREMENT PRIMARY KEY,
+                title VARCHAR(255) NOT NULL,
+                content TEXT NOT NULL,
+                category VARCHAR(255) NOT NULL,
+                sentiment VARCHAR(255) NOT NULL,
+                summary TEXT NOT NULL
+            )
+            """
+            await cursor.execute(create_table_query)
+            await conn.commit()
+        await conn.ensure_closed()
+        print("✅ Table check complete.")
+    except Exception as e:
+        print(f"❌ Error ensuring table exists: {e}")
 
-    def __find_largest_text_block(self, soup) -> BeautifulSoup:
-        """ Fallback: Find the largest text block based on text-to-HTML ratio. """
-        article_content = []
-        parent_radio = self.__process_text_ratio(soup)[0]
+# Classify Articles
+def classify_texts(texts):
+    inputs = classify_tokenizer(texts, return_tensors="pt", truncation=True, padding=True).to(device)
+    with torch.no_grad():
+        logits = classify_model(**inputs).logits
+    predicted_classes = torch.argmax(logits, dim=1).tolist()
+    return [classify_model.config.id2label.get(pred, "Unknown") for pred in predicted_classes]
 
-        for tag in soup.find_all(['p', 'div']):
-            # Calculate the text ratio of each tag
-            tag_radio, tag_len = self.__process_text_ratio(tag)
-            if tag_len > 0 and tag_radio >= parent_radio:
-                # Accumulate potential article content based on the text ratio threshold
-                article_content.append(tag)
+# Classify Sentiment
+def classify_sentiments(texts):
+    if not texts:
+        return []
+    inputs = sentiment_tokenizer(texts, return_tensors="pt", truncation=True, padding=True, max_length=512).to(device)
+    with torch.no_grad():
+        logits = sentiment_model(**inputs).logits
+    probabilities = F.softmax(logits, dim=-1)
+    predicted_classes = torch.argmax(probabilities, dim=-1) + 1
+    sentiment_labels = ["Very Negative", "Negative", "Neutral", "Positive", "Very Positive"]
+    return [sentiment_labels[pred.item() - 1] for pred in predicted_classes]
 
-        # If significant tags found, return the combined result as one soup
-        if article_content:
-            return BeautifulSoup(" ".join([str(tag) for tag in article_content]), 'lxml')
-        return soup
+# Summarize Articles
+def summarize_articles(articles):
+    inputs = summarize_tokenizer(articles, return_tensors="pt", truncation=True, padding=True, max_length=1024).to(device)
+    summary_ids = summarize_model.generate(
+        inputs.input_ids, max_length=120, min_length=60, length_penalty=1.5, num_beams=6, early_stopping=True
+    )
+    return summarize_tokenizer.batch_decode(summary_ids, skip_special_tokens=True)
 
-    def __get_title(self, soup) -> str:
-        """ Extract the article title based on h1-h6 tags or <title> """
-        title = ''
-        if soup:
-            for t in soup.find_all_previous(re.compile("^h[1-6]")):
-                if t.text:
-                    title = t.text
-                    break
+# Store Data in MySQL
+async def store_in_mysql(title, content, category, sentiment, summary):
+    try:
+        conn = await aiomysql.connect(**DB_CONFIG)
+        async with conn.cursor() as cursor:
+            query = """
+            INSERT INTO news_articles (title, content, category, sentiment, summary) 
+            VALUES (%s, %s, %s, %s, %s)
+            """
+            await cursor.execute(query, (title, content, category, sentiment, summary))
+            await conn.commit()
+        await conn.ensure_closed()
+        print(f"✅ Stored in MySQL: {title}")
+    except Exception as e:
+        print(f"❌ Error storing in MySQL: {e}")
 
-        if not title:
-            html = BeautifulSoup(self.html, 'lxml')
-            if html.title:
-                title = html.title.text.split('_')[0].split('|')[0]
+# Process Sample Content
+async def process_articles():
+    await ensure_table_exists()
+    categories = classify_texts(sample_contents)
+    sentiments = classify_sentiments(sample_contents)
+    summaries = summarize_articles(sample_contents)
 
-        self.title = re.sub(r'<[\s\S]*?>|[\t\r\f\v]|^\s+|\s+$', "", title)
-        return self.title
+    for i, content in enumerate(sample_contents):
+        title = f"Article {i+1}"
+        await store_in_mysql(title, content, categories[i], sentiments[i], summaries[i])
 
-    def __download(self) -> str:
-        """ Download HTML content from the given URL """
-        response = requests.get(self.url, **self.kwargs)
-        response.raise_for_status()
-        html = ''
-        if response.encoding != 'ISO-8859-1':
-            # return response as a unicode string
-            html = response.text
-        else:
-            html = response.content
-            if 'charset' not in response.headers.get('content-type'):
-                encodings = requests.utils.get_encodings_from_content(response.text)
-                if len(encodings) > 0:
-                    response.encoding = encodings[0]
-                    html = response.text
-        return html
-
-    def parse(self) -> tuple:
-        """ Parse the HTML and extract the article """
-        soup = BeautifulSoup(self.html, 'lxml').find('body')
-        if soup:
-            for tag in soup.find_all(style=re.compile('display:\s?none')):
-                tag.extract()
-            for comment in soup.find_all(text=lambda text: isinstance(text, Comment)):
-                comment.extract()
-
-            article_html = self.__find_article_html(soup)
-            if self.output == 'markdown':
-                return self.__get_title(article_html), self.__html_to_md(article_html)
-            else:
-                return self.__get_title(article_html), self.__clean_html(article_html)
-        return '', ''
-
-    def __html_to_md(self, soup) -> str:
-        """ Convert HTML to Markdown """
-        return html2text.html2text(str(soup), baseurl=self.url)
-
-    def __clean_html(self, soup) -> str:
-        """ Extract only text from HTML, remove unwanted tags """
-        text_content = BeautifulSoup(str(soup), 'lxml').get_text(separator=' ', strip=True)
-        return text_content
-
-
-# Utility function to use the Extractor class
-def parse(url='', html='', threshold=0.9, output='html', **kwargs):
-    """
-    Extract article by URL or HTML.
-
-    :param url: URL for the article.
-    :param html: HTML for the article.
-    :param threshold: The ratio of text to the entire document, default 0.9.
-    :param output: Result output format, supports ``markdown`` and ``html``, default ``html``.
-    :param **kwargs: Optional arguments that ``requests.get`` takes.
-    :return: :class:`tuple` object containing (title, article_content)
-    """
-    ext = Extractor(url=url, html=html, threshold=threshold, output=output, **kwargs)
-    return ext.parse()
-
-
-# Example usage
-if __name__ == "__main__":
-    # Replace 'your_news_article_url_here' with the actual news article URL
-    url = 'https://www.bbc.com/news/articles/clywepq2eq2o'
-    
-    # Call the parse function with the URL
-    '''
-    title, content = parse(url=url)
-    file_path="output.txt"
-    with open(file_path, 'w', encoding='utf-8') as file:
-        file.write(f"Title: {title}\n\n")
-        file.write("Content:\n")
-        file.write(content)
-    
-    print(f"Article saved to {file_path}")
-    '''
+asyncio.run(process_articles())

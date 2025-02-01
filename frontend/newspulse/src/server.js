@@ -1,5 +1,5 @@
 import express from "express";
-import mysql from "mysql";
+import mysql from "mysql2";
 import cors from "cors";
 import dotenv from "dotenv";
 
@@ -15,8 +15,8 @@ app.use(express.json());
 const db = mysql.createConnection({
   host: "localhost",
   user: "root",
-  password: "Aadi@157",
-  database: "newpulse",
+  password: "BeqFUzW8",
+  database: "news_db",
 });
 
 db.connect((err) => {
@@ -31,7 +31,7 @@ db.connect((err) => {
 app.get("/api/news", (req, res) => {
   const { sentiment, domain, search } = req.query;
   console.log(sentiment, domain, search);
-  let query = "SELECT * FROM news WHERE 1=1";
+  let query = "SELECT * FROM news_articles WHERE 1=1";
   const values = [];
 
   if (sentiment && sentiment !== "all") {
