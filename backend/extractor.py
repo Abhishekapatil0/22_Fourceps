@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 import re
 import copy
 import requests
@@ -22,7 +21,7 @@ class Extractor():
         if soup:
             if isinstance(soup, NavigableString):
                 return 1
-            for t in soup.find_all(['script', 'style', 'noscript', 'a', 'img']):
+            for t in soup.find_all(['script', 'style', 'noscript', 'a', 'img']):  # Remove unwanted tags
                 t.extract()
             soup_str = re.sub(
                 r'\s*[^=\s+]+\s*=\s*([^=>]+)?(?=(\s+|>))', "", str(soup))
@@ -43,41 +42,46 @@ class Extractor():
 
         # Remove unwanted elements such as ads and recommendations
         unwanted_selectors = [
-            {'tag': 'div', 'class_': re.compile(r'ad|ads|sponsored|promo|related|recommendation|footer')},  # Common ad classes
-            {'tag': 'aside'},  # <aside> often contains ads or side content
-            {'tag': 'nav'},  # <nav> is for navigation, which we don’t need
-            {'tag': 'footer'},  # Footer is not part of the main article
-            {'tag': 'section', 'class_': re.compile(r'related|recommendations')},  # Sections for related content
+            {'tag': 'div', 'class_': re.compile(r'ad|ads|sponsored|promo|related|recommendation|footer')},
+            {'tag': 'aside'},
+            {'tag': 'nav'},
+            {'tag': 'footer'},
+            {'tag': 'section', 'class_': re.compile(r'related|recommendations')},
         ]
-        
+
         for selector in unwanted_selectors:
             if 'class_' in selector:
                 for unwanted_tag in soup.find_all(selector['tag'], class_=selector['class_']):
-                    unwanted_tag.extract()  # Remove the unwanted tag
+                    unwanted_tag.extract()
             else:
                 for unwanted_tag in soup.find_all(selector['tag']):
-                    unwanted_tag.extract()  # Remove the unwanted tag
+                    unwanted_tag.extract()
 
-        # Common classes or tags that hold article content on news websites
+        # Common article selectors
         article_selectors = [
-            {'tag': 'article'},  # Many news sites use <article> tag for news content
-            {'tag': 'div', 'class_': re.compile(r'article|content|main|story')},  # Matching common article classes
-            {'tag': 'section', 'class_': re.compile(r'article|content|main|story')},  # Sometimes sections are used
+            {'tag': 'article'},
+            {'tag': 'div', 'class_': re.compile(r'article|content|main|story')},
+            {'tag': 'section', 'class_': re.compile(r'article|content|main|story')},
         ]
 
         for selector in article_selectors:
-            # Find potential article content tags
             if 'class_' in selector:
                 article_tag = soup.find(selector['tag'], class_=selector['class_'])
             else:
                 article_tag = soup.find(selector['tag'])
 
             if article_tag:
-                # If a matching tag is found, return that tag as the article content
-                return article_tag
+                return self.__stop_at_end_of_article(article_tag)
 
-        # If no specific article tags are found, use the default ratio-based logic
-        return self.__find_largest_text_block(soup)
+            return self.__stop_at_end_of_article(self.__find_largest_text_block(soup))
+
+    def __stop_at_end_of_article(self, soup) -> BeautifulSoup:
+        """ Stop processing the article content after encountering 'End of Article'. """
+        text_elements = soup.find_all(text=True)
+        for i, elem in enumerate(text_elements):
+            if 'End of Article' in elem:
+                return BeautifulSoup(" ".join([str(e) for e in text_elements[:i]]), 'lxml')
+        return soup
 
     def __find_largest_text_block(self, soup) -> BeautifulSoup:
         """ Fallback: Find the largest text block based on text-to-HTML ratio. """
@@ -114,9 +118,13 @@ class Extractor():
         return self.title
 
     def __download(self) -> str:
-        """ Download HTML content from the given URL """
-        response = requests.get(self.url, **self.kwargs)
+        """ Download HTML content from the given URL using ScraperAPI """
+        scraper_api_key = "e9f4817c01987fa9ac0d6d52ffabda9b"  # Replace with your ScraperAPI key
+        scraper_url = f"http://api.scraperapi.com?api_key={scraper_api_key}&url={self.url}"
+
+        response = requests.get(scraper_url, **self.kwargs)
         response.raise_for_status()
+
         html = ''
         if response.encoding != 'ISO-8859-1':
             # return response as a unicode string
@@ -134,9 +142,9 @@ class Extractor():
         """ Parse the HTML and extract the article """
         soup = BeautifulSoup(self.html, 'lxml').find('body')
         if soup:
-            for tag in soup.find_all(style=re.compile('display:\s?none')):
+            for tag in soup.find_all(style=re.compile(r'display:\s?none')):  # Hide tags with 'display:none'
                 tag.extract()
-            for comment in soup.find_all(text=lambda text: isinstance(text, Comment)):
+            for comment in soup.find_all(text=lambda text: isinstance(text, Comment)):  # Remove comments
                 comment.extract()
 
             article_html = self.__find_article_html(soup)
@@ -175,7 +183,7 @@ def parse(url='', html='', threshold=0.9, output='html', **kwargs):
 # Example usage
 if __name__ == "__main__":
     # Replace 'your_news_article_url_here' with the actual news article URL
-    url = 'https://www.bbc.com/news/articles/clywepq2eq2o'
+    url = 'https://www.theguardian.com/us-news/2025/jan/31/philadelphia-plane-crash'
     
     # Call the parse function with the URL
     title, content = parse(url=url)

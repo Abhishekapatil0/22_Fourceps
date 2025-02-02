@@ -11,12 +11,11 @@ const PORT = process.env.PORT || 5000;
 app.use(cors());
 app.use(express.json());
 
-// ✅ MySQL Database Connection
 const db = mysql.createConnection({
-  host: "localhost",
-  user: "root",
-  password: "BeqFUzW8",
-  database: "news_db",
+  host: process.env.DB_HOST || "localhost",
+  user: process.env.DB_USER || "root",
+  password: process.env.DB_PASSWORD || "adhesh",
+  database: process.env.DB_NAME || "news_db",
 });
 
 db.connect((err) => {
@@ -27,11 +26,10 @@ db.connect((err) => {
   }
 });
 
-// ✅ API Route to Fetch News with Filters
 app.get("/api/news", (req, res) => {
   const { sentiment, domain, search } = req.query;
-  console.log(sentiment, domain, search);
-  let query = "SELECT * FROM news_articles WHERE 1=1";
+  
+  let query = "SELECT * FROM news_analytics_results WHERE 1=1";
   const values = [];
 
   if (sentiment && sentiment !== "all") {
@@ -39,13 +37,16 @@ app.get("/api/news", (req, res) => {
     values.push(sentiment);
   }
   if (domain && domain !== "all") {
-    query += " AND domain = ?";
+    query += " AND classification = ?";
     values.push(domain);
   }
   if (search) {
-    query += " AND (title LIKE ? OR content LIKE ?)";
+    query += " AND (title LIKE ? OR summary LIKE ?)";
     values.push(`%${search}%`, `%${search}%`);
   }
+
+  console.log("Executing query:", query);
+  console.log("With values:", values);
 
   db.query(query, values, (err, results) => {
     if (err) {
@@ -56,7 +57,6 @@ app.get("/api/news", (req, res) => {
   });
 });
 
-// ✅ Start the Server
 app.listen(PORT, () => {
   console.log(`Server running on http://localhost:${PORT}`);
 });
